@@ -8,7 +8,7 @@ jobs:
   ubuntu:
     strategy:
       matrix:
-        version: ["PHP-8.1", "PHP-8.2"]
+        version: ["PHP-8.0", "PHP-8.1", "PHP-8.2"]
     runs-on: ubuntu-latest
     steps:
       - name: Setup Ubuntu
@@ -22,9 +22,9 @@ jobs:
           cd php-src
           ./buildconf --force
           ./configure --disable-all \
-          			  --enable-gcov \
-          			  --prefix=/opt \
-          			  --with-config-file-path=/opt/etc
+            --enable-gcov \
+            --prefix=/opt \
+            --with-config-file-path=/opt/etc
           make -j$(nproc)
           sudo make install
       - name: Checkout
