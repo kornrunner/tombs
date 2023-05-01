@@ -1,0 +1,53 @@
+name: Build and Test
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '18 3 * * *'
+jobs:
+  ubuntu:
+    strategy:
+      matrix:
+        version: ["PHP-8.1", "PHP-8.2"]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Ubuntu
+        run: sudo apt-get install lcov re2c bison
+      - name: Install PHP
+        run: |
+          sudo mkdir /opt/src
+          sudo chmod 777 /opt/src
+          cd /opt/src
+          git clone --depth=1 --branch ${{matrix.version}} https://github.com/php/php-src
+          cd php-src
+          ./buildconf --force
+          ./configure --disable-all \
+          			  --enable-gcov \
+          			  --prefix=/opt \
+          			  --with-config-file-path=/opt/etc
+          make -j$(nproc)
+          sudo make install
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Generate Build Files
+        run: /opt/bin/phpize
+      - name: Configure Build
+        run: ./configure --enable-tombs --with-php-config=/opt/bin/php-config
+      - name: Build
+        run: EXTRA_CFLAGS="-fprofile-arcs -ftest-coverage" make
+      - name: Install
+        run: sudo make install
+      - name: Configure Installation
+        run: |
+          sudo mkdir /opt/etc
+          sudo chmod 777 /opt/etc
+          echo "zend_extension=tombs.so" > /opt/etc/php.ini
+      - name: Run Tests
+        run: /opt/bin/php run-tests.php -q -g FAIL,XFAIL,XLEAK,SKIP,BORK,WARN -P --show-diff
+      - name: Generate Test Coverage
+        run: lcov -c --directory ./ --exclude *Zend* --exclude */usr/include* --output-file coverage.info
+      - name: Coveralls
+        uses: coverallsapp/github-action@master
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path-to-lcov: coverage.info
