@@ -31,25 +31,32 @@
 # define ZEND_TOMBS_EXTENSION_API
 #endif
 
+#include "php.h"
+#include "zend_observer.h"
 #include "zend_tombs.h"
 #include "zend_tombs_strings.h"
 #include "zend_tombs_graveyard.h"
 #include "zend_tombs_ini.h"
 #include "zend_tombs_io.h"
 #include "zend_tombs_markers.h"
+#include "zend_tombs_function_table.h"
+
+#include "php_ini.h"
+#include "ext/standard/info.h"
+#include "SAPI.h"
 
 static zend_tombs_markers_t   *zend_tombs_markers;
 static zend_tombs_graveyard_t *zend_tombs_graveyard;
 static int                     zend_tombs_resource = -1;
 static pid_t                   zend_tombs_started = 0;
+static zend_tombs_function_table_t *zend_tombs_function_table;
 
 static int  zend_tombs_startup(zend_extension*);
 static void zend_tombs_shutdown(zend_extension *);
 static void zend_tombs_activate(void);
 static void zend_tombs_setup(zend_op_array*);
-static void zend_tombs_execute(zend_execute_data *);
-
-static void (*zend_execute_function)(zend_execute_data *) = NULL;
+static zend_observer_fcall_handlers zend_tombs_observer_init( zend_execute_data *execute_data );
+static void zend_tombs_observer_begin(zend_execute_data *execute_data);
 
 ZEND_TOMBS_EXTENSION_API zend_extension_version_info extension_version_info = {
     ZEND_EXTENSION_API_NO,
@@ -76,12 +83,21 @@ ZEND_TOMBS_EXTENSION_API zend_extension zend_extension_entry = {
     STANDARD_ZEND_EXTENSION_PROPERTIES
 };
 
+static int is_cli_sapi() {
+    return strcmp(sapi_module.name, "cli") == 0;
+}
+
 static int zend_tombs_startup(zend_extension *ze) {
     zend_tombs_ini_startup();
 
+    if (is_cli_sapi()) {
+        zend_tombs_ini_shutdown();
+        return SUCCESS;
+    }
+
     if (!zend_tombs_ini_socket && !zend_tombs_ini_dump) {
         zend_error(E_WARNING,
-            "[TOMBS] socket and dump are both disabled by configuration, "
+            "[TOMBS] socket and dump are both disabled by configuration, shutting down."
             "may be misconfigured");
         zend_tombs_ini_shutdown();
 
@@ -89,12 +105,14 @@ static int zend_tombs_startup(zend_extension *ze) {
     }
 
     if (!zend_tombs_strings_startup(zend_tombs_ini_strings)) {
+        zend_error(E_WARNING, "[TOMBS] failed to allocate strings, shutting down.");
         zend_tombs_ini_shutdown();
 
         return SUCCESS;
     }
 
     if (!(zend_tombs_markers = zend_tombs_markers_startup(zend_tombs_ini_slots))) {
+        zend_error(E_WARNING, "[TOMBS] failed to allocate markers, shutting down.");
         zend_tombs_strings_shutdown();
         zend_tombs_ini_shutdown();
 
@@ -102,6 +120,7 @@ static int zend_tombs_startup(zend_extension *ze) {
     }
 
     if (!(zend_tombs_graveyard = zend_tombs_graveyard_startup(zend_tombs_ini_slots))) {
+        zend_error(E_WARNING, "[TOMBS] failed to allocate graveyard, shutting down.");
         zend_tombs_markers_shutdown(zend_tombs_markers);
         zend_tombs_strings_shutdown();
         zend_tombs_ini_shutdown();
@@ -110,6 +129,18 @@ static int zend_tombs_startup(zend_extension *ze) {
     }
 
     if (!zend_tombs_io_startup(zend_tombs_ini_socket, zend_tombs_graveyard)) {
+        zend_error(E_WARNING, "[TOMBS] failed to start io, shutting down.");
+        zend_tombs_graveyard_shutdown(zend_tombs_graveyard);
+        zend_tombs_markers_shutdown(zend_tombs_markers);
+        zend_tombs_strings_shutdown();
+        zend_tombs_ini_shutdown();
+
+        return SUCCESS;
+    }
+
+    if (!(zend_tombs_function_table = zend_tombs_function_table_startup(zend_tombs_ini_slots))) {
+        zend_error(E_WARNING, "[TOMBS] failed to allocate function table, shutting down.");
+        zend_tombs_io_shutdown();
         zend_tombs_graveyard_shutdown(zend_tombs_graveyard);
         zend_tombs_markers_shutdown(zend_tombs_markers);
         zend_tombs_strings_shutdown();
@@ -127,8 +158,7 @@ static int zend_tombs_startup(zend_extension *ze) {
 
     ze->handle = 0;
 
-    zend_execute_function = zend_execute_ex;
-    zend_execute_ex       = zend_tombs_execute;
+    zend_observer_fcall_register( zend_tombs_observer_init );
 
     return SUCCESS;
 }
@@ -146,13 +176,12 @@ static void zend_tombs_shutdown(zend_extension *ze) {
         zend_tombs_graveyard_dump(zend_tombs_graveyard, zend_tombs_ini_dump);
     }
 
+    zend_tombs_function_table_shutdown(zend_tombs_function_table);
     zend_tombs_io_shutdown();
     zend_tombs_graveyard_shutdown(zend_tombs_graveyard);
     zend_tombs_markers_shutdown(zend_tombs_markers);
     zend_tombs_strings_shutdown();
     zend_tombs_ini_shutdown();
-
-    zend_execute_ex = zend_execute_function;
 
     zend_tombs_started = 0;
 }
@@ -210,42 +239,82 @@ static void zend_tombs_setup(zend_op_array *ops) {
         }
     }
 
-    slot =
-        (zend_bool**)
-            &ops->reserved[zend_tombs_resource];
+    uint64_t hash = zend_tombs_hash_key(ops);
+    zend_tombs_function_entry_t *entry = zend_tombs_function_find_or_insert(hash, zend_tombs_function_table);
 
-    marker = zend_tombs_markers_create(zend_tombs_markers);
-
-    if (UNEXPECTED(NULL == marker)) {
-        /* no marker space left */
+    if (UNEXPECTED(NULL == entry)) {
+        // no function space left
         return;
     }
 
-    if (__atomic_compare_exchange_n(slot, &nil, marker, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
-        zend_tombs_graveyard_populate(
-            zend_tombs_graveyard,
-            zend_tombs_markers_index(
-                zend_tombs_markers, (zend_bool*)marker),
-            ops);
-    }
+    // If the function table entry has a marker index of -1, allocate new marker and tomb.
+    zend_long expected_marker_index = -1;
+    if (__atomic_compare_exchange_n(&entry->marker_index, &expected_marker_index, -2, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+        // We won the race to allocate a new marker and tomb (and set the marker_index to -2 to indicate we're working on it)
+        zend_bool **slot = (zend_bool**)(&ops->reserved[zend_tombs_resource]);
+        zend_bool **marker = zend_tombs_markers_create(zend_tombs_markers);
 
-    /* if we get to here, we wasted a marker */
+        if (UNEXPECTED(NULL == marker)) {
+            // no marker space left
+            // also reset the marker_index to -1
+            __atomic_store_n(&entry->marker_index, -1, __ATOMIC_SEQ_CST);
+            return;
+        }
+
+        // Here we're getting the index of the marker we just created and overwriting the -2 with it.
+        zend_long marker_index = zend_tombs_markers_index(zend_tombs_markers, (zend_bool*)marker);
+        __atomic_store_n(&entry->marker_index, marker_index, __ATOMIC_SEQ_CST);
+
+        if (__atomic_compare_exchange_n(slot, &nil, marker, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+            zend_tombs_graveyard_populate(zend_tombs_graveyard, marker_index, ops);
+        }
+    } else {
+        // Either another thread is already allocating (marker_index == -2) or we already have a marker and tomb (marker_index >= 0).
+
+        // If another thread is already allocating a new marker and tomb, wait for it to finish.
+        while ( __atomic_load_n(&entry->marker_index, __ATOMIC_SEQ_CST) == -2 ) {
+            __asm__ __volatile__("pause" ::: "memory");
+        }
+
+        // Update the op_array with the correct marker if needed
+        zend_long marker_index = __atomic_load_n(&entry->marker_index, __ATOMIC_SEQ_CST);
+        zend_bool **slot = (zend_bool**)(&ops->reserved[zend_tombs_resource]);
+        zend_bool **marker = zend_tombs_markers_get(zend_tombs_markers, marker_index);
+        __atomic_compare_exchange_n(slot, &nil, marker, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    }
 }
 
-static void zend_tombs_execute(zend_execute_data *execute_data) {
+// Called the first time a function is called.
+// We set up observers if it is a user function.
+static zend_observer_fcall_handlers zend_tombs_observer_init( zend_execute_data *execute_data ) {
+    zend_function *func = EX(func);
+    if ( func->type == ZEND_INTERNAL_FUNCTION ) {
+        // We did not set up markers for PHP core functions, so we can skip them
+        return (zend_observer_fcall_handlers){NULL, NULL};
+    }
+
+    // It's a user function, so we set up observers
+    return (zend_observer_fcall_handlers){zend_tombs_observer_begin, NULL};
+}
+
+// Called when a function is about to be executed, if zend_tombs_observer_init attached us to it.
+static zend_always_inline void zend_tombs_observer_begin(zend_execute_data *execute_data)
+{
     zend_op_array *ops = (zend_op_array*) EX(func);
     zend_bool *marker   = NULL,
               _unmarked = 0,
               _marked   = 1;
 
     if (UNEXPECTED(NULL == ops->function_name)) {
-        goto _zend_tombs_execute_real;
+        return;
     }
 
     marker = __atomic_load_n(&ops->reserved[zend_tombs_resource], __ATOMIC_SEQ_CST);
+    zend_long marker_index = zend_tombs_markers_index(zend_tombs_markers, marker);
+
 
     if (UNEXPECTED(NULL == marker)) {
-        goto _zend_tombs_execute_real;
+        return;
     }
 
     if (__atomic_compare_exchange(
@@ -260,9 +329,6 @@ static void zend_tombs_execute(zend_execute_data *execute_data) {
             zend_tombs_markers_index(
                 zend_tombs_markers, marker));
     }
-
-_zend_tombs_execute_real:
-    zend_execute_function(execute_data);
 }
 
 #if defined(ZTS) && defined(COMPILE_DL_TOMBS)

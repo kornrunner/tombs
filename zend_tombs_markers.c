@@ -23,6 +23,7 @@
 # include "config.h"
 #endif
 
+#include "php.h"
 #include "zend.h"
 #include "zend_API.h"
 #include "zend_tombs.h"
@@ -64,6 +65,14 @@ zend_bool** zend_tombs_markers_create(zend_tombs_markers_t *markers) {
     }
 
     return (zend_bool**) markers->markers + slot;
+}
+
+zend_bool** zend_tombs_markers_get(zend_tombs_markers_t *markers, zend_long slot) {
+    if (EXPECTED(slot < markers->slots)) {
+        return (zend_bool**) markers->markers + slot;
+    }
+
+    return NULL;
 }
 
 void zend_tombs_markers_shutdown(zend_tombs_markers_t *markers) {
