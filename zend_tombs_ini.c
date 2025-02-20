@@ -28,6 +28,7 @@ char*        zend_tombs_ini_socket    = NULL;
 int          zend_tombs_ini_dump      = -1;
 zend_string* zend_tombs_ini_namespace = NULL;
 char*        zend_tombs_ini_graveyard_format = NULL;
+char*        zend_tombs_ini_matching_path = NULL;
 
 static ZEND_INI_MH(zend_tombs_ini_update_slots)
 {
@@ -113,6 +114,16 @@ static ZEND_INI_MH(zend_tombs_ini_update_graveyard_format)
     return SUCCESS;
 }
 
+static ZEND_INI_MH(zend_tombs_ini_update_matching_path)
+{
+    if (UNEXPECTED(NULL != zend_tombs_ini_matching_path)) {
+        return FAILURE;
+    }
+
+    zend_tombs_ini_matching_path = pestrndup(ZSTR_VAL(new_value), ZSTR_LEN(new_value), 1);
+    return SUCCESS;
+}
+
 ZEND_INI_BEGIN()
     ZEND_INI_ENTRY("tombs.slots",     "10000",             ZEND_INI_SYSTEM, zend_tombs_ini_update_slots)
     ZEND_INI_ENTRY("tombs.strings",   "32M",               ZEND_INI_SYSTEM, zend_tombs_ini_update_strings)
@@ -120,6 +131,7 @@ ZEND_INI_BEGIN()
     ZEND_INI_ENTRY("tombs.dump",      "0",                 ZEND_INI_SYSTEM, zend_tombs_ini_update_dump)
     ZEND_INI_ENTRY("tombs.namespace", "",                  ZEND_INI_SYSTEM, zend_tombs_ini_update_namespace)
     ZEND_INI_ENTRY("tombs.graveyard_format", "json",       ZEND_INI_SYSTEM, zend_tombs_ini_update_graveyard_format)
+    ZEND_INI_ENTRY("tombs.matching_path", "",              ZEND_INI_SYSTEM, zend_tombs_ini_update_matching_path)
 ZEND_INI_END()
 
 void zend_tombs_ini_startup() {

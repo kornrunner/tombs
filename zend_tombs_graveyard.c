@@ -59,7 +59,29 @@ struct _zend_tomb_t {
 static zend_tomb_t zend_tomb_empty = {{0, 0}, NULL, NULL, {NULL, {0, 0}}};
 
 static zend_always_inline void __zend_tomb_create(zend_tombs_graveyard_t *graveyard, zend_tomb_t *tomb, zend_op_array *ops) {
-    tomb->location.file       = zend_tombs_string(ops->filename);
+    char real_path[PATH_MAX];
+    if (realpath(ZSTR_VAL(ops->filename), real_path) == NULL) {
+        return;
+    }
+
+    zend_string *real_path_str = zend_string_init(real_path, strlen(real_path), 0);
+
+    if (zend_tombs_ini_matching_path) {
+        char *matching_path = strstr(ZSTR_VAL(real_path_str), zend_tombs_ini_matching_path);
+        if (matching_path) {
+            zend_string *ignored_path = zend_string_init(matching_path, strlen(matching_path), 0);
+            tomb->location.file = zend_tombs_string(ignored_path);
+            zend_string_release(ignored_path);
+        } else {
+            zend_string_release(real_path_str);
+            return;
+        }
+    } else {
+        tomb->location.file = zend_tombs_string(real_path_str);
+    }
+
+    zend_string_release(real_path_str);
+
     tomb->location.line.start = ops->line_start;
     tomb->location.line.end   = ops->line_end;
 

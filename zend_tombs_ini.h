@@ -27,6 +27,7 @@ extern char*        zend_tombs_ini_socket;
 extern int          zend_tombs_ini_dump;
 extern zend_string* zend_tombs_ini_namespace;
 extern char*        zend_tombs_ini_graveyard_format;
+extern char*        zend_tombs_ini_matching_path;
 
 void zend_tombs_ini_startup();
 void zend_tombs_ini_shutdown();
