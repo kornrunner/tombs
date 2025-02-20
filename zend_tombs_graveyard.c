@@ -64,23 +64,30 @@ static zend_always_inline void __zend_tomb_create(zend_tombs_graveyard_t *gravey
         return;
     }
 
-    zend_string *real_path_str = zend_string_init(real_path, strlen(real_path), 0);
+    const char *final_path = real_path;
 
     if (zend_tombs_ini_matching_path) {
-        char *matching_path = strstr(ZSTR_VAL(real_path_str), zend_tombs_ini_matching_path);
-        if (matching_path) {
-            zend_string *ignored_path = zend_string_init(matching_path, strlen(matching_path), 0);
-            tomb->location.file = zend_tombs_string(ignored_path);
-            zend_string_release(ignored_path);
-        } else {
-            zend_string_release(real_path_str);
-            return;
+        char *paths = estrdup(zend_tombs_ini_matching_path);
+        char *token = strtok(paths, ",");
+
+        while (token) {
+            while (isspace((unsigned char)*token)) {
+                token++;
+            }
+
+            char *found = strstr(final_path, token);
+            if (found) {
+                final_path = found + strlen(token);
+                break;
+            }
+
+            token = strtok(NULL, ",");
         }
-    } else {
-        tomb->location.file = zend_tombs_string(real_path_str);
+
+        efree(paths);
     }
 
-    zend_string_release(real_path_str);
+    tomb->location.file = zend_tombs_string(zend_string_init(final_path, strlen(final_path), 0));
 
     tomb->location.line.start = ops->line_start;
     tomb->location.line.end   = ops->line_end;
